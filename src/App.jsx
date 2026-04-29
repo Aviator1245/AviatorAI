@@ -5,6 +5,7 @@ const SPACES = ["Health", "Career", "Learning", "Projects", "Finance", "Relation
 const CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct";
 const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
+const APP_PASSWORD = "avinaash"; // ← change this to whatever you want
 
 const SPACE_PERSONAS = {
   Health: {
@@ -296,8 +297,8 @@ async function gistRead({ gistId, githubToken }) {
   return JSON.parse(raw);
 }
 
-async function gistWrite({ gistId, githubToken, facts, insights }) {
-  const payload = { facts, insights, updatedAt: Date.now() };
+async function gistWrite({ gistId, githubToken, facts, insights, tasks }) {
+  const payload = { facts, insights, tasks: tasks || [], updatedAt: Date.now() };
   const res = await fetch(`https://api.github.com/gists/${gistId}`, {
     method: "PATCH",
     headers: {
@@ -392,8 +393,41 @@ Respond ONLY with valid JSON:
   } catch { return []; }
 }
 
+// ─── Task Extractor ───────────────────────────────────────────────────────────
+async function extractTasks({ apiKey, userMsg, assistantMsg, existingTasks }) {
+  const existingSample = existingTasks.slice(-20).map((t) => t.text).join("\n");
+  const prompt = `You are a task extractor for a personal AI assistant called Aviator.ai.
+
+Extract actionable tasks/reminders from the conversation below.
+A task is something the user needs to DO — not a fact about them.
+
+Trigger phrases: "remind me to", "I need to", "I should", "follow up on", "don't forget to", "I have to", "I want to", "I'll", "I plan to", "make sure to", "remember to".
+
+RULES:
+1. Only extract clear, actionable tasks.
+2. Do NOT extract general info, facts, or vague statements.
+3. Infer priority from urgency/importance: high = urgent/critical, medium = soon/important, low = someday/nice-to-have.
+4. Infer due date if explicitly mentioned (e.g. "by Friday", "tomorrow", "next week") — use ISO date string (YYYY-MM-DD). Otherwise null.
+
+Existing tasks (do not duplicate):
+${existingSample || "(none)"}
+
+User said: "${userMsg}"
+Assistant said: "${assistantMsg}"
+
+Respond ONLY with valid JSON:
+{"tasks": [{"text": "...", "priority": "high|medium|low", "dueDate": "YYYY-MM-DD or null"}]}
+If no tasks, return: {"tasks": []}`;
+
+  try {
+    const raw = await callAI({ apiKey, model: EXTRACT_MODEL, messages: [{ role: "user", content: prompt }], max_tokens: 512, json: true });
+    const parsed = JSON.parse(raw);
+    return (parsed.tasks || []).filter((t) => t.text);
+  } catch { return []; }
+}
+
 // ─── Space Chat Component ─────────────────────────────────────────────────────
-function SpaceChat({ space, facts, apiKey, onExtractFacts, setExtracting }) {
+function SpaceChat({ space, facts, tasks, apiKey, onExtractFacts, onExtractTasks, setExtracting }) {
   const persona = SPACE_PERSONAS[space];
   const spaceFacts = facts.filter((f) => f.space === space);
   const historyKey = `aviator_history_${space}`;
@@ -420,10 +454,14 @@ function SpaceChat({ space, facts, apiKey, onExtractFacts, setExtracting }) {
     const memBlock = spaceFacts.length > 0
       ? `\n\nWhat you know about Avinaash (${space} context):\n${spaceFacts.map((f) => `- ${f.fact}`).join("\n")}`
       : "";
+    const pendingTasks = tasks.filter((t) => !t.done);
+    const taskBlock = pendingTasks.length > 0
+      ? `\n\nPending tasks Avinaash has:\n${pendingTasks.map((t) => `- [${t.priority}] ${t.text}${t.dueDate ? ` (due ${t.dueDate})` : ""}`).join("\n")}`
+      : "";
     return `You are Aviator, Avinaash's personal ${persona.role}. You are sharp, focused, and genuinely helpful.
 This is the ${space} space — stay focused on ${persona.focus}.
 You remember everything relevant to this area and use it naturally in conversation.
-Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
+Keep responses concise unless asked to elaborate. No fluff.${memBlock}${taskBlock}`;
   };
 
   const sendMessage = async () => {
@@ -460,7 +498,11 @@ Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
         setExtracting(true);
         extractFacts({ apiKey, userMsg: text, assistantMsg: reply, existingFacts: facts })
           .then((newFacts) => { if (newFacts.length > 0) onExtractFacts(newFacts); })
-          .finally(() => setExtracting(false));
+          .finally(() => {
+            extractTasks({ apiKey, userMsg: text, assistantMsg: reply, existingTasks: tasks })
+              .then((newTasks) => { if (newTasks.length > 0) onExtractTasks(newTasks); })
+              .finally(() => setExtracting(false));
+          });
       },
       onError: (msg) => {
         setError(msg);
@@ -579,7 +621,7 @@ Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
 }
 
 // ─── Overall Chat Component ───────────────────────────────────────────────────
-function OverallChat({ facts, apiKey, onExtractFacts, setExtracting }) {
+function OverallChat({ facts, tasks, apiKey, onExtractFacts, onExtractTasks, setExtracting }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -602,11 +644,15 @@ function OverallChat({ facts, apiKey, onExtractFacts, setExtracting }) {
     const memBlock = facts.length > 0
       ? `\n\nWhat you know about Avinaash:\n${facts.map((f) => `- [${f.space}] ${f.fact}`).join("\n")}`
       : "";
+    const pendingTasks = tasks.filter((t) => !t.done);
+    const taskBlock = pendingTasks.length > 0
+      ? `\n\nPending tasks:\n${pendingTasks.map((t) => `- [${t.priority}] ${t.text}${t.dueDate ? ` (due ${t.dueDate})` : ""}`).join("\n")}`
+      : "";
     return `You are Aviator, Avinaash's personal AI second brain. You are sharp, direct, and genuinely helpful.
 You remember everything about Avinaash and use that context naturally in conversation — like a trusted assistant who knows him well.
 You have full context across all areas of his life: health, career, learning, projects, finance, relationships, and personal growth.
-Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
-  }, [facts]);
+Keep responses concise unless asked to elaborate. No fluff.${memBlock}${taskBlock}`;
+  }, [facts, tasks]);
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -641,7 +687,11 @@ Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
         setExtracting(true);
         extractFacts({ apiKey, userMsg: text, assistantMsg: reply, existingFacts: facts })
           .then((newFacts) => { if (newFacts.length > 0) onExtractFacts(newFacts); })
-          .finally(() => setExtracting(false));
+          .finally(() => {
+            extractTasks({ apiKey, userMsg: text, assistantMsg: reply, existingTasks: tasks })
+              .then((newTasks) => { if (newTasks.length > 0) onExtractTasks(newTasks); })
+              .finally(() => setExtracting(false));
+          });
       },
       onError: (msg) => {
         setError(msg);
@@ -745,8 +795,169 @@ Keep responses concise unless asked to elaborate. No fluff.${memBlock}`;
   );
 }
 
+// ─── Tasks View Component ─────────────────────────────────────────────────────
+const PRIORITY_CONFIG = {
+  high:   { color: "#f87171", bg: "#1a0808", border: "#3a1010", label: "high" },
+  medium: { color: "#fb923c", bg: "#1a0f00", border: "#3a1e00", label: "med" },
+  low:    { color: "#6b7280", bg: "#111", border: "#222", label: "low" },
+};
+
+function TasksView({ tasks, onAdd, onToggle, onDelete }) {
+  const [newText, setNewText] = useState("");
+  const [newPriority, setNewPriority] = useState("medium");
+  const [newDueDate, setNewDueDate] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [filter, setFilter] = useState("pending"); // "pending" | "done" | "all"
+  const inputRef = useRef(null);
+
+  const today = new Date().toDateString();
+
+  const isOverdue = (t) => !t.done && t.dueDate && new Date(t.dueDate) < new Date(today);
+
+  const filtered = tasks.filter((t) => {
+    if (filter === "pending") return !t.done;
+    if (filter === "done") return t.done;
+    return true;
+  }).sort((a, b) => {
+    // Sort: overdue first, then by priority, then by created
+    if (!a.done && !b.done) {
+      const aOver = isOverdue(a), bOver = isOverdue(b);
+      if (aOver !== bOver) return aOver ? -1 : 1;
+      const prioOrder = { high: 0, medium: 1, low: 2 };
+      if (prioOrder[a.priority] !== prioOrder[b.priority]) return prioOrder[a.priority] - prioOrder[b.priority];
+    }
+    return b.createdAt - a.createdAt;
+  });
+
+  const handleAdd = () => {
+    if (!newText.trim()) return;
+    onAdd(newText, newPriority, newDueDate || null);
+    setNewText(""); setNewDueDate(""); setNewPriority("medium"); setShowForm(false);
+  };
+
+  const pendingCount = tasks.filter((t) => !t.done).length;
+  const overdueCount = tasks.filter((t) => isOverdue(t)).length;
+
+  return (
+    <div style={{ flex: 1, overflow: "auto", padding: "24px 28px", display: "flex", flexDirection: "column", gap: "14px" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <h2 style={{ fontSize: "15px", fontWeight: "600", color: "#fff", margin: 0 }}>Tasks</h2>
+          {overdueCount > 0 && (
+            <span style={{ fontSize: "10px", color: "#f87171", background: "#1a0808", border: "1px solid #3a1010", borderRadius: "10px", padding: "2px 8px" }}>
+              {overdueCount} overdue
+            </span>
+          )}
+        </div>
+        <button
+          style={{ background: showForm ? "#1a1a1a" : "#e8e8e8", color: showForm ? "#555" : "#000", border: "none", borderRadius: "8px", padding: "7px 14px", cursor: "pointer", fontWeight: "600", fontSize: "12px", fontFamily: "inherit" }}
+          onClick={() => { setShowForm(!showForm); setTimeout(() => inputRef.current?.focus(), 50); }}
+        >{showForm ? "✕ cancel" : "+ add task"}</button>
+      </div>
+
+      {/* Add form */}
+      {showForm && (
+        <div style={{ background: "#0f0f0f", border: "1px solid #1e1e1e", borderRadius: "10px", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+          <input
+            ref={inputRef}
+            style={{ background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "7px", padding: "9px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
+            placeholder="What needs to be done?"
+            value={newText}
+            onChange={(e) => setNewText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          />
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            {/* Priority picker */}
+            <div style={{ display: "flex", gap: "4px" }}>
+              {["high", "medium", "low"].map((p) => {
+                const cfg = PRIORITY_CONFIG[p];
+                const active = newPriority === p;
+                return (
+                  <button key={p} onClick={() => setNewPriority(p)}
+                    style={{ background: active ? cfg.bg : "transparent", border: `1px solid ${active ? cfg.border : "#222"}`, color: active ? cfg.color : "#444", borderRadius: "6px", padding: "4px 10px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit", transition: "all 0.1s" }}>
+                    {cfg.label}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Due date */}
+            <input
+              style={{ background: "#0a0a0a", border: "1px solid #222", color: "#888", borderRadius: "6px", padding: "4px 8px", fontSize: "11px", outline: "none", fontFamily: "inherit", colorScheme: "dark" }}
+              type="date" value={newDueDate} onChange={(e) => setNewDueDate(e.target.value)}
+            />
+            <button
+              style={{ marginLeft: "auto", background: newText.trim() ? "#e8e8e8" : "#1a1a1a", color: newText.trim() ? "#000" : "#2a2a2a", border: "none", borderRadius: "7px", padding: "6px 14px", cursor: newText.trim() ? "pointer" : "not-allowed", fontWeight: "600", fontSize: "12px", fontFamily: "inherit" }}
+              onClick={handleAdd} disabled={!newText.trim()}
+            >add →</button>
+          </div>
+        </div>
+      )}
+
+      {/* Filter tabs */}
+      <div style={{ display: "flex", gap: "4px" }}>
+        {[["pending", `pending (${pendingCount})`], ["done", "done"], ["all", "all"]].map(([val, label]) => (
+          <button key={val} onClick={() => setFilter(val)}
+            style={{ background: filter === val ? "#1a1a1a" : "transparent", border: `1px solid ${filter === val ? "#2a2a2a" : "#111"}`, color: filter === val ? "#e8e8e8" : "#444", borderRadius: "6px", padding: "4px 11px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Task list */}
+      {filtered.length === 0 ? (
+        <p style={{ color: "#333", margin: "4px 0", textAlign: "center", lineHeight: "1.6" }}>
+          {filter === "pending" ? "No pending tasks. Add one above or chat — tasks get extracted automatically." : "Nothing here yet."}
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+          {filtered.map((t) => {
+            const cfg = PRIORITY_CONFIG[t.priority] || PRIORITY_CONFIG.medium;
+            const overdue = isOverdue(t);
+            return (
+              <div key={t.id}
+                style={{ display: "flex", alignItems: "center", gap: "10px", background: overdue ? "#110808" : "#0f0f0f", border: `1px solid ${overdue ? "#2a1010" : "#161616"}`, borderRadius: "8px", padding: "10px 13px", transition: "opacity 0.2s", opacity: t.done ? 0.45 : 1 }}
+                onMouseEnter={(e) => e.currentTarget.querySelector(".task-del").style.opacity = "1"}
+                onMouseLeave={(e) => e.currentTarget.querySelector(".task-del").style.opacity = "0"}
+              >
+                {/* Checkbox */}
+                <button onClick={() => onToggle(t.id)}
+                  style={{ width: "16px", height: "16px", borderRadius: "4px", border: `1px solid ${t.done ? "#2a2a2a" : cfg.border}`, background: t.done ? "#1a1a1a" : cfg.bg, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", color: cfg.color, padding: 0 }}>
+                  {t.done ? "✓" : ""}
+                </button>
+
+                {/* Priority badge */}
+                <span style={{ fontSize: "9px", color: cfg.color, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: "4px", padding: "1px 5px", flexShrink: 0, letterSpacing: "0.04em" }}>{cfg.label}</span>
+
+                {/* Text */}
+                <span style={{ color: t.done ? "#3a3a3a" : "#b8b8b8", flex: 1, lineHeight: "1.5", textDecoration: t.done ? "line-through" : "none", fontSize: "13px" }}>{t.text}</span>
+
+                {/* Due date */}
+                {t.dueDate && !t.done && (
+                  <span style={{ fontSize: "10px", color: overdue ? "#f87171" : "#3a3a3a", whiteSpace: "nowrap", flexShrink: 0 }}>
+                    {overdue ? "⚠ " : ""}{t.dueDate}
+                  </span>
+                )}
+
+                {/* Delete */}
+                <button className="task-del" onClick={() => onDelete(t.id)}
+                  style={{ background: "transparent", border: "1px solid #2a1010", color: "#7a3030", borderRadius: "4px", padding: "2px 6px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit", opacity: 0, transition: "opacity 0.15s", flexShrink: 0 }}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function AviatorAI() {
+  // ── Password gate ──
+  const [unlocked, setUnlocked] = useState(() => !!storageGet("aviator_unlocked"));
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+
   const [apiKey, setApiKey] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeySet, setApiKeySet] = useState(false);
@@ -759,13 +970,14 @@ export default function AviatorAI() {
   const [gistConnected, setGistConnected] = useState(false);
   const [gistSyncing, setGistSyncing] = useState(false);
   const [gistError, setGistError] = useState("");
-  const [setupStep, setSetupStep] = useState(1); // 1 = OpenRouter key, 2 = GitHub Gist
+  const [setupStep, setSetupStep] = useState(1); // 1 = credentials, 2 = done
   const gistWriteTimer = useRef(null);
   const gistLoaded = useRef(false); // blocks writes until initial Gist fetch is done
 
   const [facts, setFacts] = useState([]);
   const [insights, setInsights] = useState([]);
-  const [activeView, setActiveView] = useState("overall"); // "overall" | space name | "memory" | "insights"
+  const [tasks, setTasks] = useState([]);
+  const [activeView, setActiveView] = useState("overall"); // "overall" | space name | "memory" | "insights" | "tasks"
   const [insightLoading, setInsightLoading] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [error, setError] = useState("");
@@ -785,18 +997,20 @@ export default function AviatorAI() {
       setGithubToken(savedGithubToken);
       setGistId(savedGistId);
       setGistConnected(true);
-      // Hydrate from Gist on load
       setGistSyncing(true);
       gistRead({ gistId: savedGistId, githubToken: savedGithubToken })
         .then((remote) => {
           if (remote) {
             if (remote.facts?.length) { setFacts(remote.facts); storageSet("aviator_facts", remote.facts); }
             if (remote.insights?.length) { setInsights(remote.insights); storageSet("aviator_insights", remote.insights); }
+            if (remote.tasks?.length) { setTasks(remote.tasks); storageSet("aviator_tasks", remote.tasks); }
           } else {
             const savedFacts = storageGet("aviator_facts");
             if (savedFacts) setFacts(savedFacts);
             const savedInsights = storageGet("aviator_insights");
             if (savedInsights) setInsights(savedInsights);
+            const savedTasks = storageGet("aviator_tasks");
+            if (savedTasks) setTasks(savedTasks);
           }
         })
         .catch(() => {
@@ -804,6 +1018,8 @@ export default function AviatorAI() {
           if (savedFacts) setFacts(savedFacts);
           const savedInsights = storageGet("aviator_insights");
           if (savedInsights) setInsights(savedInsights);
+          const savedTasks = storageGet("aviator_tasks");
+          if (savedTasks) setTasks(savedTasks);
         })
         .finally(() => { gistLoaded.current = true; setGistSyncing(false); });
     } else {
@@ -811,6 +1027,8 @@ export default function AviatorAI() {
       if (savedFacts) setFacts(savedFacts);
       const savedInsights = storageGet("aviator_insights");
       if (savedInsights) setInsights(savedInsights);
+      const savedTasks = storageGet("aviator_tasks");
+      if (savedTasks) setTasks(savedTasks);
       gistLoaded.current = true;
     }
   }, []);
@@ -825,14 +1043,14 @@ export default function AviatorAI() {
     setSetupStep(2); // advance to Gist setup
   };
 
-  // Debounced Gist write — fires 2s after last fact/insight change
-  const scheduledGistWrite = useCallback((newFacts, newInsights) => {
+  // Debounced Gist write — fires 2s after last fact/insight/task change
+  const scheduledGistWrite = useCallback((newFacts, newInsights, newTasks) => {
     if (!gistConnected || !gistLoaded.current) return;
     if (gistWriteTimer.current) clearTimeout(gistWriteTimer.current);
     gistWriteTimer.current = setTimeout(() => {
       setGistSyncing(true);
-      gistWrite({ gistId, githubToken, facts: newFacts, insights: newInsights })
-        .catch(() => {}) // silent fail — localStorage already saved
+      gistWrite({ gistId, githubToken, facts: newFacts, insights: newInsights, tasks: newTasks })
+        .catch(() => {})
         .finally(() => setGistSyncing(false));
     }, 2000);
   }, [gistConnected, gistId, githubToken]);
@@ -862,7 +1080,7 @@ export default function AviatorAI() {
         }
       } else {
         // Gist is empty — safe to push local data up (if any)
-        await gistWrite({ gistId: id, githubToken: token, facts, insights });
+        await gistWrite({ gistId: id, githubToken: token, facts, insights, tasks });
       }
       gistLoaded.current = true;
     } catch (e) {
@@ -897,10 +1115,24 @@ export default function AviatorAI() {
       if (filtered.length === 0) return prev;
       const updated = [...prev, ...filtered];
       storageSet("aviator_facts", updated);
-      scheduledGistWrite(updated, insights);
+      scheduledGistWrite(updated, insights, tasks);
       return updated;
     });
-  }, [insights, scheduledGistWrite]);
+  }, [insights, tasks, scheduledGistWrite]);
+
+  const handleExtractTasks = useCallback((newTasks) => {
+    const enriched = newTasks.map((t) => ({ ...t, id: Date.now() + Math.random(), done: false, createdAt: Date.now() }));
+    setTasks((prev) => {
+      const filtered = enriched.filter((newT) =>
+        !prev.some((ex) => ex.text.toLowerCase().trim() === newT.text.toLowerCase().trim())
+      );
+      if (filtered.length === 0) return prev;
+      const updated = [...prev, ...filtered];
+      storageSet("aviator_tasks", updated);
+      scheduledGistWrite(facts, insights, updated);
+      return updated;
+    });
+  }, [facts, insights, scheduledGistWrite]);
 
   const handleGenerateInsights = async () => {
     if (facts.length < 5 || insightLoading) return;
@@ -909,7 +1141,7 @@ export default function AviatorAI() {
       const newInsights = await generateInsights({ apiKey, facts });
       setInsights(newInsights);
       storageSet("aviator_insights", newInsights);
-      scheduledGistWrite(facts, newInsights);
+      scheduledGistWrite(facts, newInsights, tasks);
     } catch (e) { setError(e.message); }
     finally { setInsightLoading(false); }
   };
@@ -923,7 +1155,7 @@ export default function AviatorAI() {
     const updated = facts.filter((_, i) => i !== globalIndex);
     setFacts(updated);
     storageSet("aviator_facts", updated);
-    scheduledGistWrite(updated, insights);
+    scheduledGistWrite(updated, insights, tasks);
   };
 
   const startEditFact = (filteredIdx) => {
@@ -937,75 +1169,149 @@ export default function AviatorAI() {
     const updated = facts.map((f, i) => i === editingFact ? { ...f, fact: editText.trim() } : f);
     setFacts(updated);
     storageSet("aviator_facts", updated);
-    scheduledGistWrite(updated, insights);
+    scheduledGistWrite(updated, insights, tasks);
     setEditingFact(null);
     setEditText("");
   };
 
-  // ── Setup Screen ──
-  if (!apiKeySet || (setupStep === 2 && !gistConnected)) {
+  // Task CRUD
+  const addTask = (text, priority, dueDate) => {
+    const newTask = { id: Date.now(), text: text.trim(), priority: priority || "medium", dueDate: dueDate || null, done: false, createdAt: Date.now() };
+    const updated = [...tasks, newTask];
+    setTasks(updated);
+    storageSet("aviator_tasks", updated);
+    scheduledGistWrite(facts, insights, updated);
+  };
+
+  const toggleTask = (id) => {
+    const updated = tasks.map((t) => t.id === id ? { ...t, done: !t.done, doneAt: !t.done ? Date.now() : null } : t);
+    setTasks(updated);
+    storageSet("aviator_tasks", updated);
+    scheduledGistWrite(facts, insights, updated);
+  };
+
+  const deleteTask = (id) => {
+    const updated = tasks.filter((t) => t.id !== id);
+    setTasks(updated);
+    storageSet("aviator_tasks", updated);
+    scheduledGistWrite(facts, insights, updated);
+  };
+
+  const pendingTaskCount = tasks.filter((t) => !t.done).length;
+  const overdueTaskCount = tasks.filter((t) => !t.done && t.dueDate && new Date(t.dueDate) < new Date(new Date().toDateString())).length;
+
+  // ── Password Screen ──
+  if (!unlocked) {
+    const handlePassword = () => {
+      if (passwordInput === APP_PASSWORD) {
+        storageSet("aviator_unlocked", true);
+        setUnlocked(true);
+        setPasswordError("");
+      } else {
+        setPasswordError("incorrect password");
+        setPasswordInput("");
+      }
+    };
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#0a0a0a", fontFamily: "'SF Mono','Fira Code','Cascadia Code',monospace" }}>
-        <div style={{ background: "#0f0f0f", border: "1px solid #1a1a1a", borderRadius: "14px", padding: "36px 32px", width: "100%", maxWidth: "420px", display: "flex", flexDirection: "column", gap: "10px" }}>
+        <div style={{ background: "#0f0f0f", border: "1px solid #1a1a1a", borderRadius: "14px", padding: "36px 32px", width: "100%", maxWidth: "360px", display: "flex", flexDirection: "column", gap: "14px" }}>
+          <div style={{ fontSize: "18px", fontWeight: "700", color: "#fff", letterSpacing: "0.06em", textAlign: "center" }}>✈ Aviator.ai</div>
+          <p style={{ color: "#444", margin: 0, fontSize: "12px", textAlign: "center" }}>enter password to continue</p>
+          <input
+            style={{ background: "#0a0a0a", border: `1px solid ${passwordError ? "#3a1010" : "#222"}`, color: "#e8e8e8", borderRadius: "8px", padding: "12px 14px", fontSize: "14px", outline: "none", fontFamily: "inherit", textAlign: "center", letterSpacing: "0.1em" }}
+            type="password" placeholder="••••••••" value={passwordInput}
+            onChange={(e) => setPasswordInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handlePassword()}
+            autoFocus
+          />
+          {passwordError && <p style={{ color: "#f87171", fontSize: "12px", margin: 0, textAlign: "center" }}>{passwordError}</p>}
+          <button
+            style={{ background: "#e8e8e8", color: "#000", border: "none", borderRadius: "8px", padding: "11px", cursor: "pointer", fontWeight: "700", fontSize: "13px", fontFamily: "inherit" }}
+            onClick={handlePassword}
+          >unlock →</button>
+        </div>
+      </div>
+    );
+  }
 
-          {/* Step indicator */}
-          <div style={{ display: "flex", gap: "6px", marginBottom: "4px" }}>
-            {[1, 2].map((s) => (
-              <div key={s} style={{ height: "3px", flex: 1, borderRadius: "2px", background: setupStep >= s ? "#e8e8e8" : "#1e1e1e", transition: "background 0.3s" }} />
-            ))}
+  // ── Credentials Setup Screen ──
+  if (!apiKeySet) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#0a0a0a", fontFamily: "'SF Mono','Fira Code','Cascadia Code',monospace" }}>
+        <div style={{ background: "#0f0f0f", border: "1px solid #1a1a1a", borderRadius: "14px", padding: "36px 32px", width: "100%", maxWidth: "440px", display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{ fontSize: "15px", fontWeight: "700", color: "#fff", letterSpacing: "0.05em" }}>✈ Aviator.ai</div>
+          <p style={{ color: "#555", margin: 0, lineHeight: "1.65", fontSize: "13px" }}>Connect your keys to get started. All stored locally, never sent anywhere except their respective services.</p>
+
+          {/* OpenRouter */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+            <label style={{ color: "#666", fontSize: "11px", letterSpacing: "0.06em" }}>OPENROUTER API KEY <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" style={{ color: "#60a5fa", marginLeft: "6px" }}>→ get one free</a></label>
+            <input style={{ background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
+              placeholder="sk-or-..." value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} type="password" autoFocus />
           </div>
 
-          <div style={{ fontSize: "15px", fontWeight: "700", color: "#fff", letterSpacing: "0.05em" }}>✈ Aviator.ai</div>
+          {/* GitHub Token */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+            <label style={{ color: "#666", fontSize: "11px", letterSpacing: "0.06em" }}>GITHUB TOKEN <a href="https://github.com/settings/tokens/new?scopes=gist&description=aviator-ai" target="_blank" rel="noreferrer" style={{ color: "#60a5fa", marginLeft: "6px" }}>→ create with gist scope</a></label>
+            <input style={{ background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
+              placeholder="ghp_..." value={githubTokenInput} onChange={(e) => setGithubTokenInput(e.target.value)} type="password" />
+          </div>
 
-          {setupStep === 1 && (
-            <>
-              <p style={{ color: "#555", margin: 0, lineHeight: "1.65", fontSize: "13px" }}>Your personal second brain. Paste your free OpenRouter API key to get started.</p>
-              <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" style={{ color: "#60a5fa", fontSize: "12px" }}>→ Get free key at openrouter.ai/keys</a>
-              <p style={{ color: "#333", fontSize: "11px", margin: 0 }}>Sign up → Keys → Create Key. Free tier works fine.</p>
-              <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-                <input style={{ flex: 1, background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
-                  placeholder="sk-or-..." value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleSetKey()} type="password" autoFocus />
-                <button style={{ background: "#e8e8e8", color: "#000", border: "none", borderRadius: "8px", padding: "10px 16px", cursor: "pointer", fontWeight: "600", fontSize: "13px", fontFamily: "inherit" }} onClick={handleSetKey}>Next →</button>
-              </div>
-              {error && <p style={{ color: "#f87171", fontSize: "12px", margin: 0 }}>{error}</p>}
-              <p style={{ color: "#2a2a2a", fontSize: "11px", margin: 0 }}>🔒 Key stored locally. Never sent anywhere except OpenRouter.</p>
-            </>
-          )}
+          {/* Gist ID */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+            <label style={{ color: "#666", fontSize: "11px", letterSpacing: "0.06em" }}>GIST ID</label>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <input style={{ flex: 1, background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
+                placeholder="paste existing or create one →" value={gistIdInput} onChange={(e) => setGistIdInput(e.target.value)} />
+              <button
+                style={{ background: "transparent", color: "#60a5fa", border: "1px solid #1a2a3a", borderRadius: "8px", padding: "10px 12px", cursor: gistSyncing ? "not-allowed" : "pointer", fontSize: "11px", fontFamily: "inherit", whiteSpace: "nowrap" }}
+                onClick={handleCreateGist} disabled={gistSyncing}
+              >{gistSyncing ? "..." : "+ create"}</button>
+            </div>
+          </div>
 
-          {setupStep === 2 && (
-            <>
-              <p style={{ color: "#555", margin: 0, lineHeight: "1.65", fontSize: "13px" }}>Connect a private GitHub Gist to sync your memory across devices — forever, no pausing.</p>
-              <div style={{ background: "#0a0a0a", border: "1px solid #161616", borderRadius: "8px", padding: "12px", fontSize: "11px", color: "#444", lineHeight: "1.7" }}>
-                <div style={{ color: "#888", marginBottom: "6px", fontSize: "12px" }}>Setup (2 min):</div>
-                <div>1. <a href="https://github.com/settings/tokens/new?scopes=gist&description=aviator-ai" target="_blank" rel="noreferrer" style={{ color: "#60a5fa" }}>Create GitHub token</a> with <code style={{ background: "#111", padding: "1px 4px", borderRadius: "3px", color: "#c084fc" }}>gist</code> scope</div>
-                <div>2. Paste token below, click <strong style={{ color: "#ccc" }}>Create Gist</strong> to auto-create one</div>
-                <div>3. Hit <strong style={{ color: "#ccc" }}>Connect</strong></div>
-              </div>
-              <input style={{ background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
-                placeholder="GitHub token (ghp_...)" value={githubTokenInput} onChange={(e) => setGithubTokenInput(e.target.value)} type="password" />
-              <div style={{ display: "flex", gap: "8px" }}>
-                <input style={{ flex: 1, background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
-                  placeholder="Gist ID (or create one →)" value={gistIdInput} onChange={(e) => setGistIdInput(e.target.value)} />
-                <button
-                  style={{ background: "transparent", color: "#60a5fa", border: "1px solid #1a2a3a", borderRadius: "8px", padding: "10px 12px", cursor: gistSyncing ? "not-allowed" : "pointer", fontSize: "11px", fontFamily: "inherit", whiteSpace: "nowrap" }}
-                  onClick={handleCreateGist} disabled={gistSyncing}
-                >+ create</button>
-              </div>
-              <div style={{ display: "flex", gap: "8px" }}>
-                <button
-                  style={{ flex: 1, background: gistSyncing ? "#1a1a1a" : "#e8e8e8", color: gistSyncing ? "#2a2a2a" : "#000", border: "none", borderRadius: "8px", padding: "10px 16px", cursor: gistSyncing ? "not-allowed" : "pointer", fontWeight: "600", fontSize: "13px", fontFamily: "inherit" }}
-                  onClick={handleConnectGist} disabled={gistSyncing}
-                >{gistSyncing ? "connecting..." : "Connect Gist"}</button>
-                <button
-                  style={{ background: "transparent", color: "#3a3a3a", border: "1px solid #1a1a1a", borderRadius: "8px", padding: "10px 14px", cursor: "pointer", fontSize: "12px", fontFamily: "inherit" }}
-                  onClick={() => { setSetupStep(3); }}
-                >skip →</button>
-              </div>
-              {gistError && <p style={{ color: gistError.startsWith("✓") ? "#4ade80" : "#f87171", fontSize: "12px", margin: 0 }}>{gistError}</p>}
-              <p style={{ color: "#2a2a2a", fontSize: "11px", margin: 0 }}>Memory syncs silently after every conversation. Works on any browser.</p>
-            </>
-          )}
+          {gistError && <p style={{ color: gistError.startsWith("✓") ? "#4ade80" : "#f87171", fontSize: "12px", margin: 0 }}>{gistError}</p>}
+          {error && <p style={{ color: "#f87171", fontSize: "12px", margin: 0 }}>{error}</p>}
+
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            <button
+              style={{ flex: 1, background: "#e8e8e8", color: "#000", border: "none", borderRadius: "8px", padding: "11px", cursor: "pointer", fontWeight: "700", fontSize: "13px", fontFamily: "inherit" }}
+              onClick={async () => {
+                const key = apiKeyInput.trim();
+                if (!key.startsWith("sk-or-")) { setError("Invalid OpenRouter key — should start with sk-or-"); return; }
+                setError("");
+                setApiKey(key);
+                storageSet("aviator_apikey", key);
+
+                const token = githubTokenInput.trim();
+                const id = gistIdInput.trim();
+                if (token && id) {
+                  setGistSyncing(true);
+                  try {
+                    const remote = await gistRead({ gistId: id, githubToken: token });
+                    setGithubToken(token); setGistId(id); setGistConnected(true);
+                    storageSet("aviator_github_token", token); storageSet("aviator_gist_id", id);
+                    if (remote?.facts?.length) { setFacts(remote.facts); storageSet("aviator_facts", remote.facts); }
+                    if (remote?.insights?.length) { setInsights(remote.insights); storageSet("aviator_insights", remote.insights); }
+                    gistLoaded.current = true;
+                  } catch (e) { setGistError(e.message || "Gist connection failed — continuing without sync"); gistLoaded.current = true; }
+                  finally { setGistSyncing(false); }
+                } else {
+                  gistLoaded.current = true;
+                }
+                setApiKeySet(true);
+              }}
+            >{gistSyncing ? "connecting..." : "launch →"}</button>
+            <button
+              style={{ background: "transparent", color: "#3a3a3a", border: "1px solid #1a1a1a", borderRadius: "8px", padding: "11px 14px", cursor: "pointer", fontSize: "12px", fontFamily: "inherit" }}
+              onClick={() => {
+                const key = apiKeyInput.trim();
+                if (!key.startsWith("sk-or-")) { setError("OpenRouter key is required"); return; }
+                setError(""); setApiKey(key); storageSet("aviator_apikey", key);
+                gistLoaded.current = true; setApiKeySet(true);
+              }}
+            >skip gist →</button>
+          </div>
+          <p style={{ color: "#2a2a2a", fontSize: "11px", margin: 0 }}>🔒 All keys stored in your browser only.</p>
         </div>
       </div>
     );
@@ -1052,6 +1358,20 @@ export default function AviatorAI() {
         {/* TOOLS section */}
         <div style={{ fontSize: "9px", color: "#555", letterSpacing: "0.12em", fontWeight: "700", margin: "16px 0 6px", paddingLeft: "10px", borderTop: "1px solid #222", paddingTop: "14px" }}>TOOLS</div>
 
+        {/* Tasks button with badge */}
+        <button
+          style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 10px", background: activeView === "tasks" ? "#1a1a1a" : "transparent", border: "none", color: activeView === "tasks" ? "#e8e8e8" : "#888", cursor: "pointer", borderRadius: "6px", fontSize: "12px", textAlign: "left", fontFamily: "inherit", width: "100%", marginBottom: "1px" }}
+          onClick={() => setActiveView("tasks")}
+        >
+          <span style={{ fontSize: "9px", opacity: 0.7 }}>✓</span>
+          Tasks
+          {pendingTaskCount > 0 && (
+            <span style={{ marginLeft: "auto", fontSize: "10px", background: overdueTaskCount > 0 ? "#2a0a0a" : "#1a1a2a", color: overdueTaskCount > 0 ? "#f87171" : "#60a5fa", border: `1px solid ${overdueTaskCount > 0 ? "#3a1010" : "#1a2a3a"}`, borderRadius: "10px", padding: "1px 6px", fontWeight: "600" }}>
+              {pendingTaskCount}
+            </span>
+          )}
+        </button>
+
         {[
           { id: "memory", label: "Memory", icon: "◈" },
           { id: "insights", label: "Insights", icon: "◆" },
@@ -1067,10 +1387,10 @@ export default function AviatorAI() {
 
         {/* Stats + bottom */}
         <div style={{ marginTop: "auto", paddingTop: "14px", borderTop: "1px solid #222", display: "flex", flexDirection: "column", gap: "5px" }}>
-          {[["facts", facts.length], ["insights", insights.length]].map(([label, val]) => (
+          {[["facts", facts.length], ["tasks", pendingTaskCount], ["insights", insights.length]].map(([label, val]) => (
             <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ color: "#666", fontSize: "10px" }}>{label}</span>
-              <span style={{ color: "#fff", fontWeight: "600", fontSize: "12px" }}>{val}</span>
+              <span style={{ color: label === "tasks" && overdueTaskCount > 0 ? "#f87171" : "#fff", fontWeight: "600", fontSize: "12px" }}>{val}</span>
             </div>
           ))}
           {extracting && <div style={{ fontSize: "10px", color: "#f59e0b", background: "#140f00", border: "1px solid #2a1e00", borderRadius: "4px", padding: "3px 7px", textAlign: "center", marginTop: "4px" }}>⚡ learning...</div>}
@@ -1089,7 +1409,7 @@ export default function AviatorAI() {
 
         <button
           style={{ background: "transparent", border: "1px solid #2a2a2a", color: "#555", borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "10px", marginTop: "8px", fontFamily: "inherit" }}
-          onClick={() => { setApiKey(""); setApiKeySet(false); setApiKeyInput(""); setGithubToken(""); setGistId(""); setGistConnected(false); setSetupStep(1); storageSet("aviator_apikey", null); storageSet("aviator_github_token", null); storageSet("aviator_gist_id", null); }}
+          onClick={() => { setApiKey(""); setApiKeySet(false); setApiKeyInput(""); setGithubToken(""); setGistId(""); setGistConnected(false); setSetupStep(1); setUnlocked(false); storageSet("aviator_apikey", null); storageSet("aviator_github_token", null); storageSet("aviator_gist_id", null); storageSet("aviator_unlocked", null); }}
         >✕ disconnect</button>
       </div>
 
@@ -1097,11 +1417,11 @@ export default function AviatorAI() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
         {activeView === "overall" && (
-          <OverallChat facts={facts} apiKey={apiKey} onExtractFacts={handleExtractFacts} setExtracting={setExtracting} />
+          <OverallChat facts={facts} tasks={tasks} apiKey={apiKey} onExtractFacts={handleExtractFacts} onExtractTasks={handleExtractTasks} setExtracting={setExtracting} />
         )}
 
         {isSpaceView && (
-          <SpaceChat key={activeView} space={activeView} facts={facts} apiKey={apiKey} onExtractFacts={handleExtractFacts} setExtracting={setExtracting} />
+          <SpaceChat key={activeView} space={activeView} facts={facts} tasks={tasks} apiKey={apiKey} onExtractFacts={handleExtractFacts} onExtractTasks={handleExtractTasks} setExtracting={setExtracting} />
         )}
 
         {/* MEMORY */}
@@ -1198,6 +1518,11 @@ export default function AviatorAI() {
               ))}
             </div>
           </div>
+        )}
+
+        {/* TASKS */}
+        {activeView === "tasks" && (
+          <TasksView tasks={tasks} onAdd={addTask} onToggle={toggleTask} onDelete={deleteTask} />
         )}
       </div>
 
