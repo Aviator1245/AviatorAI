@@ -6,7 +6,7 @@ const CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct";
 const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
 const APP_PASSWORD = "avinaash"; // ← change this to whatever you want
-const GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID"; // ← paste your client ID here
+const GOOGLE_CLIENT_ID = "761184203874-hc75eo7o06037ipniuuqfj8hvmn137q8.apps.googleusercontent.com"; // ← paste your client ID here
 const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
 const SPACE_PERSONAS = {
