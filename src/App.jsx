@@ -6,6 +6,8 @@ const CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct";
 const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
 const APP_PASSWORD = "avinaash"; // ← change this to whatever you want
+const GOOGLE_CLIENT_ID = "761184203874-hc75eo7o06037ipniuuqfj8hvmn137q8.apps.googleusercontent.com"; // ← paste your client ID here
+const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
 const SPACE_PERSONAS = {
   Health: {
@@ -459,6 +461,7 @@ function SpaceChat({ space, facts, tasks, apiKey, onExtractFacts, onExtractTasks
       ? `\n\nPending tasks Avinaash has:\n${pendingTasks.map((t) => `- [${t.priority}] ${t.text}${t.dueDate ? ` (due ${t.dueDate})` : ""}`).join("\n")}`
       : "";
     return `You are Aviator, Avinaash's personal ${persona.role}. You are sharp, focused, and genuinely helpful.
+Today's date is ${TODAY}.
 This is the ${space} space — stay focused on ${persona.focus}.
 You remember everything relevant to this area and use it naturally in conversation.
 Keep responses concise unless asked to elaborate. No fluff.${memBlock}${taskBlock}`;
@@ -649,6 +652,7 @@ function OverallChat({ facts, tasks, apiKey, onExtractFacts, onExtractTasks, set
       ? `\n\nPending tasks:\n${pendingTasks.map((t) => `- [${t.priority}] ${t.text}${t.dueDate ? ` (due ${t.dueDate})` : ""}`).join("\n")}`
       : "";
     return `You are Aviator, Avinaash's personal AI second brain. You are sharp, direct, and genuinely helpful.
+Today's date is ${TODAY}.
 You remember everything about Avinaash and use that context naturally in conversation — like a trusted assistant who knows him well.
 You have full context across all areas of his life: health, career, learning, projects, finance, relationships, and personal growth.
 Keep responses concise unless asked to elaborate. No fluff.${memBlock}${taskBlock}`;
@@ -795,6 +799,50 @@ Keep responses concise unless asked to elaborate. No fluff.${memBlock}${taskBloc
   );
 }
 
+// ─── Google Calendar ──────────────────────────────────────────────────────────
+function loadGoogleAPI() {
+  return new Promise((resolve) => {
+    if (window.google?.accounts) { resolve(); return; }
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.onload = resolve;
+    document.head.appendChild(script);
+  });
+}
+
+async function getGoogleToken(clientId) {
+  await loadGoogleAPI();
+  return new Promise((resolve, reject) => {
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "https://www.googleapis.com/auth/calendar.events",
+      callback: (resp) => {
+        if (resp.error) reject(new Error(resp.error));
+        else resolve(resp.access_token);
+      },
+    });
+    client.requestAccessToken();
+  });
+}
+
+async function createCalendarEvent({ accessToken, title, date, startTime, endTime }) {
+  // Build ISO datetime strings
+  const start = new Date(`${date}T${startTime}:00`);
+  const end = new Date(`${date}T${endTime}:00`);
+  const body = {
+    summary: title,
+    start: { dateTime: start.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    end: { dateTime: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+  };
+  const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Calendar API error ${res.status}`);
+  return await res.json();
+}
+
 // ─── Tasks View Component ─────────────────────────────────────────────────────
 const PRIORITY_CONFIG = {
   high:   { color: "#f87171", bg: "#1a0808", border: "#3a1010", label: "high" },
@@ -806,12 +854,14 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
   const [newText, setNewText] = useState("");
   const [newPriority, setNewPriority] = useState("medium");
   const [newDueDate, setNewDueDate] = useState("");
+  const [newStartTime, setNewStartTime] = useState("");
+  const [newEndTime, setNewEndTime] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [filter, setFilter] = useState("pending"); // "pending" | "done" | "all"
+  const [filter, setFilter] = useState("pending");
+  const [calendarStatus, setCalendarStatus] = useState({}); // taskId -> "loading"|"done"|"error"
   const inputRef = useRef(null);
 
   const today = new Date().toDateString();
-
   const isOverdue = (t) => !t.done && t.dueDate && new Date(t.dueDate) < new Date(today);
 
   const filtered = tasks.filter((t) => {
@@ -819,7 +869,6 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
     if (filter === "done") return t.done;
     return true;
   }).sort((a, b) => {
-    // Sort: overdue first, then by priority, then by created
     if (!a.done && !b.done) {
       const aOver = isOverdue(a), bOver = isOverdue(b);
       if (aOver !== bOver) return aOver ? -1 : 1;
@@ -831,8 +880,23 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
 
   const handleAdd = () => {
     if (!newText.trim()) return;
-    onAdd(newText, newPriority, newDueDate || null);
-    setNewText(""); setNewDueDate(""); setNewPriority("medium"); setShowForm(false);
+    onAdd(newText, newPriority, newDueDate || null, newStartTime || null, newEndTime || null);
+    setNewText(""); setNewDueDate(""); setNewPriority("medium");
+    setNewStartTime(""); setNewEndTime(""); setShowForm(false);
+  };
+
+  const handleAddToCalendar = async (t) => {
+    if (!t.dueDate || !t.startTime || !t.endTime) return;
+    setCalendarStatus((s) => ({ ...s, [t.id]: "loading" }));
+    try {
+      const token = await getGoogleToken(GOOGLE_CLIENT_ID);
+      await createCalendarEvent({ accessToken: token, title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
+      setCalendarStatus((s) => ({ ...s, [t.id]: "done" }));
+    } catch (e) {
+      console.error(e);
+      setCalendarStatus((s) => ({ ...s, [t.id]: "error" }));
+      setTimeout(() => setCalendarStatus((s) => ({ ...s, [t.id]: null })), 3000);
+    }
   };
 
   const pendingCount = tasks.filter((t) => !t.done).length;
@@ -867,8 +931,8 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
             onChange={(e) => setNewText(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleAdd()}
           />
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-            {/* Priority picker */}
+          {/* Row 1: priority + date */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: "4px" }}>
               {["high", "medium", "low"].map((p) => {
                 const cfg = PRIORITY_CONFIG[p];
@@ -881,10 +945,24 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
                 );
               })}
             </div>
-            {/* Due date */}
             <input
               style={{ background: "#0a0a0a", border: "1px solid #222", color: "#888", borderRadius: "6px", padding: "4px 8px", fontSize: "11px", outline: "none", fontFamily: "inherit", colorScheme: "dark" }}
               type="date" value={newDueDate} onChange={(e) => setNewDueDate(e.target.value)}
+            />
+          </div>
+          {/* Row 2: time interval */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <span style={{ color: "#333", fontSize: "11px", whiteSpace: "nowrap" }}>time block</span>
+            <input
+              style={{ background: "#0a0a0a", border: "1px solid #222", color: "#888", borderRadius: "6px", padding: "4px 8px", fontSize: "11px", outline: "none", fontFamily: "inherit", colorScheme: "dark", flex: 1 }}
+              type="time" value={newStartTime} onChange={(e) => setNewStartTime(e.target.value)}
+              placeholder="start"
+            />
+            <span style={{ color: "#333", fontSize: "11px" }}>→</span>
+            <input
+              style={{ background: "#0a0a0a", border: "1px solid #222", color: "#888", borderRadius: "6px", padding: "4px 8px", fontSize: "11px", outline: "none", fontFamily: "inherit", colorScheme: "dark", flex: 1 }}
+              type="time" value={newEndTime} onChange={(e) => setNewEndTime(e.target.value)}
+              placeholder="end"
             />
             <button
               style={{ marginLeft: "auto", background: newText.trim() ? "#e8e8e8" : "#1a1a1a", color: newText.trim() ? "#000" : "#2a2a2a", border: "none", borderRadius: "7px", padding: "6px 14px", cursor: newText.trim() ? "pointer" : "not-allowed", fontWeight: "600", fontSize: "12px", fontFamily: "inherit" }}
@@ -914,11 +992,13 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
           {filtered.map((t) => {
             const cfg = PRIORITY_CONFIG[t.priority] || PRIORITY_CONFIG.medium;
             const overdue = isOverdue(t);
+            const calSt = calendarStatus[t.id];
+            const canCalendar = t.dueDate && t.startTime && t.endTime && !t.done;
             return (
               <div key={t.id}
                 style={{ display: "flex", alignItems: "center", gap: "10px", background: overdue ? "#110808" : "#0f0f0f", border: `1px solid ${overdue ? "#2a1010" : "#161616"}`, borderRadius: "8px", padding: "10px 13px", transition: "opacity 0.2s", opacity: t.done ? 0.45 : 1 }}
-                onMouseEnter={(e) => e.currentTarget.querySelector(".task-del").style.opacity = "1"}
-                onMouseLeave={(e) => e.currentTarget.querySelector(".task-del").style.opacity = "0"}
+                onMouseEnter={(e) => { e.currentTarget.querySelectorAll(".task-action").forEach(el => el.style.opacity = "1"); }}
+                onMouseLeave={(e) => { e.currentTarget.querySelectorAll(".task-action").forEach(el => el.style.opacity = "0"); }}
               >
                 {/* Checkbox */}
                 <button onClick={() => onToggle(t.id)}
@@ -929,18 +1009,33 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
                 {/* Priority badge */}
                 <span style={{ fontSize: "9px", color: cfg.color, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: "4px", padding: "1px 5px", flexShrink: 0, letterSpacing: "0.04em" }}>{cfg.label}</span>
 
-                {/* Text */}
-                <span style={{ color: t.done ? "#3a3a3a" : "#b8b8b8", flex: 1, lineHeight: "1.5", textDecoration: t.done ? "line-through" : "none", fontSize: "13px" }}>{t.text}</span>
+                {/* Text + time */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ color: t.done ? "#3a3a3a" : "#b8b8b8", lineHeight: "1.5", textDecoration: t.done ? "line-through" : "none", fontSize: "13px" }}>{t.text}</span>
+                  {t.startTime && t.endTime && (
+                    <span style={{ display: "block", fontSize: "10px", color: "#2a2a2a", marginTop: "2px" }}>
+                      {t.dueDate} · {t.startTime} → {t.endTime}
+                    </span>
+                  )}
+                  {t.dueDate && !t.startTime && !t.done && (
+                    <span style={{ display: "block", fontSize: "10px", color: overdue ? "#f87171" : "#2a2a2a", marginTop: "2px" }}>
+                      {overdue ? "⚠ " : ""}{t.dueDate}
+                    </span>
+                  )}
+                </div>
 
-                {/* Due date */}
-                {t.dueDate && !t.done && (
-                  <span style={{ fontSize: "10px", color: overdue ? "#f87171" : "#3a3a3a", whiteSpace: "nowrap", flexShrink: 0 }}>
-                    {overdue ? "⚠ " : ""}{t.dueDate}
-                  </span>
+                {/* Calendar button */}
+                {canCalendar && (
+                  <button className="task-action" onClick={() => handleAddToCalendar(t)}
+                    style={{ background: calSt === "done" ? "#0d2a1a" : "transparent", border: `1px solid ${calSt === "done" ? "#1a3d2a" : calSt === "error" ? "#3a1010" : "#1a2a1a"}`, color: calSt === "done" ? "#4ade80" : calSt === "loading" ? "#444" : "#3a6a3a", borderRadius: "4px", padding: "2px 8px", cursor: calSt === "loading" ? "not-allowed" : "pointer", fontSize: "10px", fontFamily: "inherit", opacity: calSt ? 1 : 0, transition: "opacity 0.15s", flexShrink: 0, whiteSpace: "nowrap" }}
+                    disabled={calSt === "loading" || calSt === "done"}
+                  >
+                    {calSt === "loading" ? "..." : calSt === "done" ? "✓ added" : calSt === "error" ? "failed" : "📅 cal"}
+                  </button>
                 )}
 
                 {/* Delete */}
-                <button className="task-del" onClick={() => onDelete(t.id)}
+                <button className="task-action" onClick={() => onDelete(t.id)}
                   style={{ background: "transparent", border: "1px solid #2a1010", color: "#7a3030", borderRadius: "4px", padding: "2px 6px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit", opacity: 0, transition: "opacity 0.15s", flexShrink: 0 }}>✕</button>
               </div>
             );
@@ -1175,8 +1270,8 @@ export default function AviatorAI() {
   };
 
   // Task CRUD
-  const addTask = (text, priority, dueDate) => {
-    const newTask = { id: Date.now(), text: text.trim(), priority: priority || "medium", dueDate: dueDate || null, done: false, createdAt: Date.now() };
+  const addTask = (text, priority, dueDate, startTime, endTime) => {
+    const newTask = { id: Date.now(), text: text.trim(), priority: priority || "medium", dueDate: dueDate || null, startTime: startTime || null, endTime: endTime || null, done: false, createdAt: Date.now() };
     const updated = [...tasks, newTask];
     setTasks(updated);
     storageSet("aviator_tasks", updated);
