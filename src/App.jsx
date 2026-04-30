@@ -175,7 +175,7 @@ async function dbUpsertHabitLog(userId, habitId, date, done) {
 }
 
 async function dbLoadChatHistory(userId, space) {
-  const { data } = await supabase.from("chat_history").select("messages").eq("user_id", userId).eq("space", space).single();
+  const { data } = await supabase.from("chat_history").select("messages").eq("user_id", userId).eq("space", space).maybeSingle();
   return data?.messages || [];
 }
 async function dbSaveChatHistory(userId, space, messages) {
@@ -183,7 +183,7 @@ async function dbSaveChatHistory(userId, space, messages) {
 }
 
 async function dbLoadInsights(userId) {
-  const { data } = await supabase.from("chat_history").select("messages").eq("user_id", userId).eq("space", "__insights__").single();
+  const { data } = await supabase.from("chat_history").select("messages").eq("user_id", userId).eq("space", "__insights__").maybeSingle();
   return data?.messages || [];
 }
 async function dbSaveInsights(userId, insights) {
@@ -271,15 +271,24 @@ function loadGoogleAPI() {
 async function getGoogleToken(clientId) {
   await loadGoogleAPI();
   return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("OAuth timeout — popup may have been closed")), 60000);
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope: "https://www.googleapis.com/auth/calendar.events",
       callback: (resp) => {
-        if (resp.error) reject(new Error(resp.error));
+        clearTimeout(timeout);
+        console.log("CAL: OAuth callback resp=", JSON.stringify(resp));
+        if (resp.error) reject(new Error(resp.error + (resp.error_description ? ": " + resp.error_description : "")));
+        else if (!resp.access_token) reject(new Error("No access token returned"));
         else resolve(resp.access_token);
       },
+      error_callback: (err) => {
+        clearTimeout(timeout);
+        console.error("CAL: OAuth error_callback=", JSON.stringify(err));
+        reject(new Error(err?.type || err?.message || "OAuth error"));
+      },
     });
-    client.requestAccessToken();
+    client.requestAccessToken({ prompt: "consent" });
   });
 }
 
@@ -560,11 +569,15 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
     setCalendarError("");
     setCalendarStatus(s => ({ ...s, [t.id]: "loading" }));
     try {
+      console.log("CAL: getting token, clientId=", googleClientId);
       const token = await getGoogleToken(googleClientId);
-      await createCalendarEvent({ accessToken: token, title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
+      console.log("CAL: got token=", token?.slice(0, 20));
+      console.log("CAL: creating event", { title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
+      const result = await createCalendarEvent({ accessToken: token, title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
+      console.log("CAL: success", result);
       setCalendarStatus(s => ({ ...s, [t.id]: "done" }));
     } catch (e) {
-      console.error("Calendar error:", e.message);
+      console.error("CAL ERROR:", e.message, e);
       setCalendarError(`Calendar failed: ${e.message}`);
       setCalendarStatus(s => ({ ...s, [t.id]: "error" }));
       setTimeout(() => setCalendarStatus(s => ({ ...s, [t.id]: null })), 4000);
@@ -946,12 +959,31 @@ export default function AviatorAI() {
       dbLoadHabits(userId),
       dbLoadHabitLogs(userId),
       dbLoadInsights(userId),
-    ]).then(([f, t, h, hl, ins]) => {
+    ]).then(async ([f, t, h, hl, ins]) => {
       setFacts(f);
       setTasks(t);
-      setHabits(h.length > 0 ? h : []);
       setHabitLogs(hl);
       setInsights(ins);
+
+      // Seed default habits if none exist
+      let finalHabits = h;
+      if (h.length === 0) {
+        const DEFAULT_HABITS = [
+          { name: "Wake up at 6AM",     icon: "⏰", color: "#facc15" },
+          { name: "Drink 3L Water",      icon: "💧", color: "#60a5fa" },
+          { name: "Gym Workout",         icon: "🏋️", color: "#4ade80" },
+          { name: "Stretching",          icon: "🧘", color: "#a78bfa" },
+          { name: "Read 10 Pages",       icon: "📖", color: "#fb923c" },
+          { name: "Meditation",          icon: "🧘", color: "#c084fc" },
+          { name: "Study 1 Hour",        icon: "🎓", color: "#38bdf8" },
+          { name: "Skincare Routine",    icon: "✨", color: "#f472b6" },
+          { name: "Limit Social Media",  icon: "🚫", color: "#f87171" },
+          { name: "10K Steps",           icon: "👟", color: "#34d399" },
+        ];
+        const inserted = await Promise.all(DEFAULT_HABITS.map(h => dbInsertHabit(userId, h)));
+        finalHabits = inserted.filter(Boolean);
+      }
+      setHabits(finalHabits);
       setDataLoaded(true);
 
       // Show migration banner only on first login (empty DB)
