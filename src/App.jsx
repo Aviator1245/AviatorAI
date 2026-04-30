@@ -13,6 +13,7 @@ const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
 const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 const EDGE_URL = `${SUPABASE_URL}/functions/v1/openrouter-proxy`;
+const CONFIG_URL = `${SUPABASE_URL}/functions/v1/get-config`;
 
 const SPACE_PERSONAS = {
   Health: { icon: "♡", color: "#4ade80", dim: "#0d2a1a", border: "#1a3d2a", role: "personal health advisor", focus: "physical health, mental wellness, fitness, nutrition, sleep, medical concerns, energy levels, and habits affecting wellbeing" },
@@ -266,18 +267,41 @@ function loadGoogleAPI() {
     document.head.appendChild(script);
   });
 }
+
 async function getGoogleToken(clientId) {
   await loadGoogleAPI();
   return new Promise((resolve, reject) => {
-    const client = window.google.accounts.oauth2.initTokenClient({ client_id: clientId, scope: "https://www.googleapis.com/auth/calendar.events", callback: (resp) => { if (resp.error) reject(new Error(resp.error)); else resolve(resp.access_token); } });
+    const client = window.google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "https://www.googleapis.com/auth/calendar.events",
+      callback: (resp) => {
+        if (resp.error) reject(new Error(resp.error));
+        else resolve(resp.access_token);
+      },
+    });
     client.requestAccessToken();
   });
 }
+
+// ─── FIX: Pass datetime string directly with timeZone — don't convert via toISOString() ───
 async function createCalendarEvent({ accessToken, title, date, startTime, endTime }) {
-  const start = new Date(`${date}T${startTime}:00`);
-  const end = new Date(`${date}T${endTime}:00`);
-  const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ summary: title, start: { dateTime: start.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, end: { dateTime: end.toISOString(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } }) });
-  if (!res.ok) throw new Error(`Calendar API error ${res.status}`);
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const res = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      summary: title,
+      start: { dateTime: `${date}T${startTime}:00`, timeZone },
+      end:   { dateTime: `${date}T${endTime}:00`,   timeZone },
+    }),
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody?.error?.message || `Calendar API error ${res.status}`);
+  }
   return await res.json();
 }
 
@@ -503,6 +527,7 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState("pending");
   const [calendarStatus, setCalendarStatus] = useState({});
+  const [calendarError, setCalendarError] = useState("");
   const inputRef = useRef(null);
 
   const today = new Date().toDateString();
@@ -528,15 +553,22 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
     setNewText(""); setNewDueDate(""); setNewPriority("medium"); setNewStartTime(""); setNewEndTime(""); setShowForm(false);
   };
 
+  // ─── FIX: show real error, fix timezone, make button always visible ───
   const handleAddToCalendar = async (t) => {
     if (!t.dueDate || !t.startTime || !t.endTime) return;
-    if (!googleClientId) { alert("No Google Client ID set in your profile settings."); return; }
+    if (!googleClientId) { setCalendarError("No Google Client ID configured."); return; }
+    setCalendarError("");
     setCalendarStatus(s => ({ ...s, [t.id]: "loading" }));
     try {
       const token = await getGoogleToken(googleClientId);
       await createCalendarEvent({ accessToken: token, title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
       setCalendarStatus(s => ({ ...s, [t.id]: "done" }));
-    } catch (e) { setCalendarStatus(s => ({ ...s, [t.id]: "error" })); setTimeout(() => setCalendarStatus(s => ({ ...s, [t.id]: null })), 3000); }
+    } catch (e) {
+      console.error("Calendar error:", e.message);
+      setCalendarError(`Calendar failed: ${e.message}`);
+      setCalendarStatus(s => ({ ...s, [t.id]: "error" }));
+      setTimeout(() => setCalendarStatus(s => ({ ...s, [t.id]: null })), 4000);
+    }
   };
 
   const pendingCount = tasks.filter(t => !t.done).length;
@@ -575,6 +607,14 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
         {[["pending", `pending (${pendingCount})`], ["done", "done"], ["all", "all"]].map(([val, label]) => <button key={val} onClick={() => setFilter(val)} style={{ background: filter === val ? "#1a1a1a" : "transparent", border: `1px solid ${filter === val ? "#2a2a2a" : "#111"}`, color: filter === val ? "#e8e8e8" : "#444", borderRadius: "6px", padding: "4px 11px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit" }}>{label}</button>)}
       </div>
 
+      {/* Calendar error banner */}
+      {calendarError && (
+        <div style={{ background: "#140a0a", border: "1px solid #3a1010", color: "#f87171", borderRadius: "8px", padding: "8px 12px", fontSize: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{calendarError}</span>
+          <button onClick={() => setCalendarError("")} style={{ background: "transparent", border: "none", color: "#f87171", cursor: "pointer", fontSize: "14px", padding: 0, lineHeight: 1 }}>✕</button>
+        </div>
+      )}
+
       {filtered.length === 0 ? <p style={{ color: "#333", margin: "4px 0", textAlign: "center", lineHeight: "1.6" }}>{filter === "pending" ? "No pending tasks. Add one above or chat — tasks get extracted automatically." : "Nothing here yet."}</p> : (
         <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
           {filtered.map(t => {
@@ -583,7 +623,7 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
             const calSt = calendarStatus[t.id];
             const canCalendar = t.dueDate && t.startTime && t.endTime && !t.done;
             return (
-              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: "10px", background: overdue ? "#110808" : "#0f0f0f", border: `1px solid ${overdue ? "#2a1010" : "#161616"}`, borderRadius: "8px", padding: "10px 13px", opacity: t.done ? 0.45 : 1 }} onMouseEnter={e => e.currentTarget.querySelectorAll(".task-action").forEach(el => el.style.opacity = "1")} onMouseLeave={e => e.currentTarget.querySelectorAll(".task-action").forEach(el => el.style.opacity = "0")}>
+              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: "10px", background: overdue ? "#110808" : "#0f0f0f", border: `1px solid ${overdue ? "#2a1010" : "#161616"}`, borderRadius: "8px", padding: "10px 13px", opacity: t.done ? 0.45 : 1 }}>
                 <button onClick={() => onToggle(t.id)} style={{ width: "16px", height: "16px", borderRadius: "4px", border: `1px solid ${t.done ? "#2a2a2a" : cfg.border}`, background: t.done ? "#1a1a1a" : cfg.bg, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", color: cfg.color, padding: 0 }}>{t.done ? "✓" : ""}</button>
                 <span style={{ fontSize: "9px", color: cfg.color, background: cfg.bg, border: `1px solid ${cfg.border}`, borderRadius: "4px", padding: "1px 5px", flexShrink: 0 }}>{cfg.label}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -591,8 +631,25 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
                   {t.startTime && t.endTime && <span style={{ display: "block", fontSize: "10px", color: "#2a2a2a", marginTop: "2px" }}>{t.dueDate} · {t.startTime} → {t.endTime}</span>}
                   {t.dueDate && !t.startTime && !t.done && <span style={{ display: "block", fontSize: "10px", color: overdue ? "#f87171" : "#2a2a2a", marginTop: "2px" }}>{overdue ? "⚠ " : ""}{t.dueDate}</span>}
                 </div>
-                {canCalendar && <button className="task-action" onClick={() => handleAddToCalendar(t)} style={{ background: calSt === "done" ? "#0d2a1a" : "transparent", border: `1px solid ${calSt === "done" ? "#1a3d2a" : calSt === "error" ? "#3a1010" : "#1a2a1a"}`, color: calSt === "done" ? "#4ade80" : calSt === "loading" ? "#444" : "#3a6a3a", borderRadius: "4px", padding: "2px 8px", cursor: calSt === "loading" ? "not-allowed" : "pointer", fontSize: "10px", fontFamily: "inherit", opacity: calSt ? 1 : 0, transition: "opacity 0.15s", flexShrink: 0, whiteSpace: "nowrap" }} disabled={calSt === "loading" || calSt === "done"}>{calSt === "loading" ? "..." : calSt === "done" ? "✓ added" : calSt === "error" ? "failed" : "📅 cal"}</button>}
-                <button className="task-action" onClick={() => onDelete(t.id)} style={{ background: "transparent", border: "1px solid #2a1010", color: "#7a3030", borderRadius: "4px", padding: "2px 6px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit", opacity: 0, transition: "opacity 0.15s", flexShrink: 0 }}>✕</button>
+                {/* ─── FIX: always visible cal button (no opacity:0 hiding) ─── */}
+                {canCalendar && (
+                  <button
+                    onClick={() => handleAddToCalendar(t)}
+                    disabled={calSt === "loading" || calSt === "done"}
+                    style={{
+                      background: calSt === "done" ? "#0d2a1a" : "transparent",
+                      border: `1px solid ${calSt === "done" ? "#1a3d2a" : calSt === "error" ? "#3a1010" : "#1a2a1a"}`,
+                      color: calSt === "done" ? "#4ade80" : calSt === "loading" ? "#444" : calSt === "error" ? "#f87171" : "#3a6a3a",
+                      borderRadius: "4px", padding: "2px 8px",
+                      cursor: calSt === "loading" || calSt === "done" ? "not-allowed" : "pointer",
+                      fontSize: "10px", fontFamily: "inherit", flexShrink: 0, whiteSpace: "nowrap",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {calSt === "loading" ? "..." : calSt === "done" ? "✓ added" : calSt === "error" ? "✕ failed" : "📅 cal"}
+                  </button>
+                )}
+                <button onClick={() => onDelete(t.id)} style={{ background: "transparent", border: "1px solid #2a1010", color: "#7a3030", borderRadius: "4px", padding: "2px 6px", cursor: "pointer", fontSize: "11px", fontFamily: "inherit", flexShrink: 0 }}>✕</button>
               </div>
             );
           })}
@@ -877,8 +934,8 @@ export default function AviatorAI() {
     if (!userId || !session) { setDataLoaded(false); return; }
     setDataLoaded(false);
 
-    // Fetch Google Client ID from Vault (non-blocking)
-    fetch(`${EDGE_URL}/config`, { headers: { Authorization: `Bearer ${session.access_token}` } })
+    // Fetch Google Client ID from Vault via dedicated config endpoint
+    fetch(CONFIG_URL, { headers: { Authorization: `Bearer ${session.access_token}` } })
       .then(r => r.json())
       .then(d => { if (d.google_client_id) setGoogleClientId(d.google_client_id); })
       .catch(() => {});
