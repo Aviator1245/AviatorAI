@@ -12,6 +12,9 @@ const CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct";
 const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
 const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+// ─── Local date key (YYYY-MM-DD in user's timezone, not UTC) ──────────────────
+const localDateKey = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const EDGE_URL = `${SUPABASE_URL}/functions/v1/openrouter-proxy`;
 const CONFIG_URL = `${SUPABASE_URL}/functions/v1/get-config`;
 
@@ -218,7 +221,7 @@ Space must be one of: ${SPACES.join(", ")}`;
 
 async function extractTasks({ session, userMsg, assistantMsg, existingTasks }) {
   const existingSample = existingTasks.slice(-20).map(t => t.text).join("\n");
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = localDateKey();
   const prompt = `You are a task extractor for a personal AI assistant called Aviator.ai.
 Today's date is ${todayStr}. Use this to resolve relative dates like "today", "tomorrow", "next Monday".
 Extract actionable tasks/reminders from the conversation below.
@@ -678,7 +681,7 @@ function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
 
 // ─── Habits View ──────────────────────────────────────────────────────────────
 function HabitsView({ habits, setHabits, habitLogs, setHabitLogs, userId }) {
-  const todayKey = new Date().toISOString().slice(0, 10);
+  const todayKey = localDateKey();
   const [showAddForm, setShowAddForm] = useState(false);
   const [newHabitName, setNewHabitName] = useState("");
   const [newHabitIcon, setNewHabitIcon] = useState("⭐");
@@ -711,11 +714,16 @@ function HabitsView({ habits, setHabits, habitLogs, setHabitLogs, userId }) {
   const getStreak = (habitId) => {
     let streak = 0;
     const d = new Date();
-    while (true) { const key = d.toISOString().slice(0, 10); if (habitLogs[key]?.[habitId]) { streak++; d.setDate(d.getDate() - 1); } else break; }
+    // If not checked today yet, start from yesterday so streak survives midnight
+    if (!habitLogs[localDateKey(d)]?.[habitId]) d.setDate(d.getDate() - 1);
+    while (true) {
+      const key = localDateKey(d);
+      if (habitLogs[key]?.[habitId]) { streak++; d.setDate(d.getDate() - 1); } else break;
+    }
     return streak;
   };
 
-  const last7 = Array.from({ length: 7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); return d.toISOString().slice(0, 10); });
+  const last7 = Array.from({ length: 7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); return localDateKey(d); });
   const dayLabels = last7.map(k => { const d = new Date(k + "T12:00:00"); return d.toLocaleDateString("en-US", { weekday: "short" }).slice(0, 1); });
   const todayDone = habits.filter(h => todayLogs[h.id]).length;
   const pct = habits.length > 0 ? Math.round((todayDone / habits.length) * 100) : 0;
@@ -1085,6 +1093,8 @@ export default function AviatorAI() {
     </div>
   );
 
+  const navigateTo = (view) => { setActiveView(view); };
+
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0a0a0a", color: "#e8e8e8", fontFamily: "'SF Mono','Fira Code','Cascadia Code',monospace", fontSize: "13px" }}>
 
@@ -1121,7 +1131,7 @@ export default function AviatorAI() {
         <button style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 10px", background: activeView === "habits" ? "#1a1a1a" : "transparent", border: "none", color: activeView === "habits" ? "#e8e8e8" : "#888", cursor: "pointer", borderRadius: "6px", fontSize: "12px", textAlign: "left", fontFamily: "inherit", width: "100%", marginBottom: "1px" }} onClick={() => setActiveView("habits")}>
           <span style={{ fontSize: "9px", opacity: 0.7 }}>◎</span>
           Habits
-          {Object.values(habitLogs[new Date().toISOString().slice(0, 10)] || {}).filter(Boolean).length > 0 && <span style={{ marginLeft: "auto", fontSize: "10px", color: "#4ade80", background: "#0d2a1a", border: "1px solid #1a3d2a", borderRadius: "10px", padding: "1px 6px", fontWeight: "600" }}>{Object.values(habitLogs[new Date().toISOString().slice(0, 10)] || {}).filter(Boolean).length}/{habits.length}</span>}
+          {Object.values(habitLogs[localDateKey()] || {}).filter(Boolean).length > 0 && <span style={{ marginLeft: "auto", fontSize: "10px", color: "#4ade80", background: "#0d2a1a", border: "1px solid #1a3d2a", borderRadius: "10px", padding: "1px 6px", fontWeight: "600" }}>{Object.values(habitLogs[localDateKey()] || {}).filter(Boolean).length}/{habits.length}</span>}
         </button>
 
         {[{ id: "memory", label: "Memory", icon: "◈" }, { id: "insights", label: "Insights", icon: "◆" }].map(item => <button key={item.id} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "7px 10px", background: activeView === item.id ? "#1a1a1a" : "transparent", border: "none", color: activeView === item.id ? "#e8e8e8" : "#888", cursor: "pointer", borderRadius: "6px", fontSize: "12px", textAlign: "left", fontFamily: "inherit", width: "100%", marginBottom: "1px" }} onClick={() => setActiveView(item.id)}>
@@ -1144,6 +1154,7 @@ export default function AviatorAI() {
 
       {/* ── Main ── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
 
         {/* Migration banner */}
         {showMigration && <MigrationBanner userId={userId} onMigrated={async () => { setShowMigration(false); const [f, t, h, hl] = await Promise.all([dbLoadFacts(userId), dbLoadTasks(userId), dbLoadHabits(userId), dbLoadHabitLogs(userId)]); setFacts(f); setTasks(t); setHabits(h); setHabitLogs(hl); }} />}
@@ -1243,6 +1254,10 @@ export default function AviatorAI() {
         ::-webkit-scrollbar{width:4px}
         ::-webkit-scrollbar-track{background:#0a0a0a}
         ::-webkit-scrollbar-thumb{background:#222;border-radius:2px}
+        @media(max-width:767px){
+          html,body{height:100%;overflow:hidden;}
+          textarea{font-size:16px!important;}
+        }
       `}</style>
     </div>
   );
