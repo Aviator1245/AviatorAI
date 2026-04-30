@@ -6,7 +6,7 @@ const CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct";
 const EXTRACT_MODEL = "meta-llama/llama-3.1-8b-instruct";
 const MAX_HISTORY = 20;
 const APP_PASSWORD = "avinaash"; // ← change this to whatever you want
-const GOOGLE_CLIENT_ID = "761184203874-hc75eo7o06037ipniuuqfj8hvmn137q8.apps.googleusercontent.com"; // ← paste your client ID here
+// GOOGLE_CLIENT_ID is now entered by the user at setup time
 const TODAY = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
 const SPACE_PERSONAS = {
@@ -850,7 +850,7 @@ const PRIORITY_CONFIG = {
   low:    { color: "#6b7280", bg: "#111", border: "#222", label: "low" },
 };
 
-function TasksView({ tasks, onAdd, onToggle, onDelete }) {
+function TasksView({ tasks, onAdd, onToggle, onDelete, googleClientId }) {
   const [newText, setNewText] = useState("");
   const [newPriority, setNewPriority] = useState("medium");
   const [newDueDate, setNewDueDate] = useState("");
@@ -887,9 +887,10 @@ function TasksView({ tasks, onAdd, onToggle, onDelete }) {
 
   const handleAddToCalendar = async (t) => {
     if (!t.dueDate || !t.startTime || !t.endTime) return;
+    if (!googleClientId) { alert("No Google Client ID set. Re-open settings and add your Google Client ID."); return; }
     setCalendarStatus((s) => ({ ...s, [t.id]: "loading" }));
     try {
-      const token = await getGoogleToken(GOOGLE_CLIENT_ID);
+      const token = await getGoogleToken(googleClientId);
       await createCalendarEvent({ accessToken: token, title: t.text, date: t.dueDate, startTime: t.startTime, endTime: t.endTime });
       setCalendarStatus((s) => ({ ...s, [t.id]: "done" }));
     } catch (e) {
@@ -1057,6 +1058,10 @@ export default function AviatorAI() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeySet, setApiKeySet] = useState(false);
 
+  // Google Client ID
+  const [googleClientId, setGoogleClientId] = useState("");
+  const [googleClientIdInput, setGoogleClientIdInput] = useState("");
+
   // Gist sync state
   const [githubToken, setGithubToken] = useState("");
   const [gistId, setGistId] = useState("");
@@ -1085,6 +1090,9 @@ export default function AviatorAI() {
   useEffect(() => {
     const savedKey = storageGet("aviator_apikey");
     if (savedKey) { setApiKey(savedKey); setApiKeySet(true); }
+
+    const savedGoogleClientId = storageGet("aviator_google_client_id");
+    if (savedGoogleClientId) { setGoogleClientId(savedGoogleClientId); }
 
     const savedGithubToken = storageGet("aviator_github_token");
     const savedGistId = storageGet("aviator_gist_id");
@@ -1351,6 +1359,13 @@ export default function AviatorAI() {
               placeholder="ghp_..." value={githubTokenInput} onChange={(e) => setGithubTokenInput(e.target.value)} type="password" />
           </div>
 
+          {/* Google Client ID */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+            <label style={{ color: "#666", fontSize: "11px", letterSpacing: "0.06em" }}>GOOGLE CLIENT ID <span style={{ color: "#3a3a3a", marginLeft: "4px" }}>(optional, for Calendar)</span></label>
+            <input style={{ background: "#0a0a0a", border: "1px solid #222", color: "#e8e8e8", borderRadius: "8px", padding: "10px 12px", fontSize: "13px", outline: "none", fontFamily: "inherit" }}
+              placeholder="xxxxxxx.apps.googleusercontent.com" value={googleClientIdInput} onChange={(e) => setGoogleClientIdInput(e.target.value)} />
+          </div>
+
           {/* Gist ID */}
           <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
             <label style={{ color: "#666", fontSize: "11px", letterSpacing: "0.06em" }}>GIST ID</label>
@@ -1377,6 +1392,9 @@ export default function AviatorAI() {
                 setApiKey(key);
                 storageSet("aviator_apikey", key);
 
+                const gcid = googleClientIdInput.trim();
+                if (gcid) { setGoogleClientId(gcid); storageSet("aviator_google_client_id", gcid); }
+
                 const token = githubTokenInput.trim();
                 const id = gistIdInput.trim();
                 if (token && id) {
@@ -1402,6 +1420,8 @@ export default function AviatorAI() {
                 const key = apiKeyInput.trim();
                 if (!key.startsWith("sk-or-")) { setError("OpenRouter key is required"); return; }
                 setError(""); setApiKey(key); storageSet("aviator_apikey", key);
+                const gcid = googleClientIdInput.trim();
+                if (gcid) { setGoogleClientId(gcid); storageSet("aviator_google_client_id", gcid); }
                 gistLoaded.current = true; setApiKeySet(true);
               }}
             >skip gist →</button>
@@ -1504,7 +1524,7 @@ export default function AviatorAI() {
 
         <button
           style={{ background: "transparent", border: "1px solid #2a2a2a", color: "#555", borderRadius: "6px", padding: "5px 10px", cursor: "pointer", fontSize: "10px", marginTop: "8px", fontFamily: "inherit" }}
-          onClick={() => { setApiKey(""); setApiKeySet(false); setApiKeyInput(""); setGithubToken(""); setGistId(""); setGistConnected(false); setSetupStep(1); setUnlocked(false); storageSet("aviator_apikey", null); storageSet("aviator_github_token", null); storageSet("aviator_gist_id", null); storageSet("aviator_unlocked", null); }}
+          onClick={() => { setApiKey(""); setApiKeySet(false); setApiKeyInput(""); setGithubToken(""); setGistId(""); setGistConnected(false); setSetupStep(1); setUnlocked(false); setGoogleClientId(""); setGoogleClientIdInput(""); storageSet("aviator_apikey", null); storageSet("aviator_github_token", null); storageSet("aviator_gist_id", null); storageSet("aviator_unlocked", null); storageSet("aviator_google_client_id", null); }}
         >✕ disconnect</button>
       </div>
 
@@ -1617,7 +1637,7 @@ export default function AviatorAI() {
 
         {/* TASKS */}
         {activeView === "tasks" && (
-          <TasksView tasks={tasks} onAdd={addTask} onToggle={toggleTask} onDelete={deleteTask} />
+          <TasksView tasks={tasks} onAdd={addTask} onToggle={toggleTask} onDelete={deleteTask} googleClientId={googleClientId} />
         )}
       </div>
 
