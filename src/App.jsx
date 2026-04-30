@@ -218,20 +218,24 @@ Space must be one of: ${SPACES.join(", ")}`;
 
 async function extractTasks({ session, userMsg, assistantMsg, existingTasks }) {
   const existingSample = existingTasks.slice(-20).map(t => t.text).join("\n");
+  const todayStr = new Date().toISOString().slice(0, 10);
   const prompt = `You are a task extractor for a personal AI assistant called Aviator.ai.
+Today's date is ${todayStr}. Use this to resolve relative dates like "today", "tomorrow", "next Monday".
 Extract actionable tasks/reminders from the conversation below.
-Trigger phrases: "remind me to", "I need to", "I should", "follow up on", "don't forget to", "I have to", "I want to", "I'll", "I plan to", "make sure to", "remember to".
+Trigger phrases: "remind me to", "I need to", "I should", "follow up on", "don't forget to", "I have to", "I want to", "I'll", "I plan to", "make sure to", "remember to", "add a task", "schedule", "call", "meeting".
 RULES:
 1. Only extract clear, actionable tasks.
 2. Do NOT extract general info, facts, or vague statements.
-3. Infer priority: high = urgent/critical, medium = soon/important, low = someday.
-4. Infer due date if mentioned (YYYY-MM-DD). Otherwise null.
+3. Infer priority: high = urgent/today, medium = soon/important, low = someday.
+4. Infer due date from context using today's date (${todayStr}). "today" = ${todayStr}. "tomorrow" = next day. Always output YYYY-MM-DD or null.
+5. Infer startTime and endTime from context. "6 to 7 PM" = startTime "18:00", endTime "19:00". "10-11am" = startTime "10:00", endTime "11:00". Always use 24h HH:MM format or null.
+6. Keep task text clean — do not include the date/time in the text since it's stored separately.
 Existing tasks (do not duplicate):
 ${existingSample || "(none)"}
 User said: "${userMsg}"
 Assistant said: "${assistantMsg}"
 Respond ONLY with valid JSON:
-{"tasks": [{"text": "...", "priority": "high|medium|low", "dueDate": "YYYY-MM-DD or null"}]}
+{"tasks": [{"text": "...", "priority": "high|medium|low", "dueDate": "YYYY-MM-DD or null", "startTime": "HH:MM or null", "endTime": "HH:MM or null"}]}
 If no tasks, return: {"tasks": []}`;
   try {
     const raw = await callAI({ session, model: EXTRACT_MODEL, messages: [{ role: "user", content: prompt }], max_tokens: 512, json: true });
